@@ -1,0 +1,24 @@
+# Python
+venv/
+__pycache__/
+*.pyc
+*.pyo
+
+# Data files
+*.xlsx
+*.csv
+*.mp3
+*.wav
+
+# Cached transcripts & analysis
+recordings/
+transcripts/
+analysis/
+
+# Old scripts (not part of pipeline)
+*.py
+!scripts/*.py
+
+# Environment
+.env
+*.log

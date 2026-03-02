@@ -1,0 +1,53 @@
+name: Fetch Call Data
+
+on:
+  schedule:
+    # 2:00 AM IST = 8:30 PM UTC (previous day)
+    - cron: "30 20 * * *"
+  workflow_dispatch:
+    inputs:
+      date:
+        description: "Specific date to fetch (YYYY-MM-DD), leave empty for yesterday"
+        required: false
+      days:
+        description: "Number of days back to fetch (default: 1)"
+        required: false
+        default: "1"
+      limit:
+        description: "Max records per account per day (for testing, leave empty for all)"
+        required: false
+
+jobs:
+  fetch-calls:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: pip install requests psycopg2-binary
+
+      - name: Fetch call data
+        env:
+          TATA_TELE_API_KEY_INBOUND: ${{ secrets.TATA_TELE_API_KEY_INBOUND }}
+          TATA_TELE_API_KEY_OUTBOUND: ${{ secrets.TATA_TELE_API_KEY_OUTBOUND }}
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+        run: |
+          ARGS=""
+          if [ -n "${{ github.event.inputs.date }}" ]; then
+            ARGS="$ARGS --date ${{ github.event.inputs.date }}"
+          fi
+          if [ -n "${{ github.event.inputs.days }}" ]; then
+            ARGS="$ARGS --days ${{ github.event.inputs.days }}"
+          fi
+          if [ -n "${{ github.event.inputs.limit }}" ]; then
+            ARGS="$ARGS --limit ${{ github.event.inputs.limit }}"
+          fi
+          python scripts/fetch_calls.py $ARGS

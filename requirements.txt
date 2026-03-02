@@ -1,0 +1,6 @@
+requests
+psycopg2-binary
+pandas
+openai
+elevenlabs
+tqdm
