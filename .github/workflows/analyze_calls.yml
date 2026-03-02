@@ -1,0 +1,62 @@
+name: Analyze Calls
+
+on:
+  schedule:
+    # 3:00 AM IST = 9:30 PM UTC (previous day)
+    - cron: "30 21 * * *"
+  workflow_dispatch:
+    inputs:
+      date:
+        description: "Specific date (YYYY-MM-DD), leave empty for all pending"
+        required: false
+      limit:
+        description: "Max calls to process (for testing)"
+        required: false
+      transcribe_only:
+        description: "Only transcribe, skip GPT analysis"
+        required: false
+        type: boolean
+        default: false
+      analyze_only:
+        description: "Only GPT analysis (transcripts must exist)"
+        required: false
+        type: boolean
+        default: false
+
+jobs:
+  analyze:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: pip install requests psycopg2-binary elevenlabs openai
+
+      - name: Analyze calls
+        env:
+          ELEVENLABS_API_KEY: ${{ secrets.ELEVENLABS_API_KEY }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+        run: |
+          ARGS=""
+          if [ -n "${{ github.event.inputs.date }}" ]; then
+            ARGS="$ARGS --date ${{ github.event.inputs.date }}"
+          fi
+          if [ -n "${{ github.event.inputs.limit }}" ]; then
+            ARGS="$ARGS --limit ${{ github.event.inputs.limit }}"
+          fi
+          if [ "${{ github.event.inputs.transcribe_only }}" = "true" ]; then
+            ARGS="$ARGS --transcribe-only"
+          fi
+          if [ "${{ github.event.inputs.analyze_only }}" = "true" ]; then
+            ARGS="$ARGS --analyze-only"
+          fi
+          python scripts/analyze_calls.py $ARGS
