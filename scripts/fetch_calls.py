@@ -18,7 +18,7 @@ import argparse
 import requests
 import psycopg2
 from psycopg2.extras import Json
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 import time
 
 # ============================================
@@ -473,7 +473,8 @@ def main():
     else:
         dates = []
         for i in range(1, args.days + 1):
-            d = (datetime.now() - timedelta(days=i)).strftime("%Y-%m-%d")
+            IST = timezone(timedelta(hours=5, minutes=30))
+            d = (datetime.now(IST) - timedelta(days=i)).strftime("%Y-%m-%d")
             dates.append(d)
 
     print(f"  Dates: {', '.join(dates)}")
