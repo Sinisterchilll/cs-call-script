@@ -52,7 +52,7 @@ CATEGORIES = [
     "vehicle_repair_or_damage", "vehicle_missing",
     "hub_location_inquiry", "vehicle_availability", "vehicle_pickup_or_return", "hub_service_delay",
     "app_error_or_block", "app_data_mismatch", "referral_issue",
-    "no_response_or_disconnected", "general_inquiry", "language_barrier", "service_complaint",
+    "no_response_or_disconnected", "general_inquiry", "language_barrier", "service_complaint", "police", "escalation"
 ]
 
 CATEGORY_DESCRIPTIONS = """
@@ -86,6 +86,8 @@ CATEGORY_DESCRIPTIONS = """
 - general_inquiry: General questions, greetings, doesn't fit other categories
 - language_barrier: Communication difficult due to language mismatch
 - service_complaint: General dissatisfaction, escalation request, poor service feedback
+- police: Police related issues, traffic fines, vehicle impounded
+- escalation: Escalation requests, will be contacted back
 """
 
 GPT_SYSTEM_PROMPT = "You are a call analysis engine for an EV rental company. Return only valid JSON."
