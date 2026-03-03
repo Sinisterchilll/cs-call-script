@@ -1,12 +1,15 @@
 """
 Fetch call records from Tata Tele Smartflo API and push to Postgres.
 Supports multiple Tata Tele accounts (inbound + outbound).
-Designed to run daily as a GitHub Actions cron job.
+Designed to run hourly as a GitHub Actions cron job.
+
+Always fetches today + yesterday by default to avoid missing calls near midnight.
+Duplicate detection via Call ID prevents re-insertion of already-seen records.
 
 Usage:
-    python scripts/fetch_calls.py                    # Fetch yesterday's calls
-    python scripts/fetch_calls.py --date 2026-03-01  # Fetch specific date
-    python scripts/fetch_calls.py --days 3           # Fetch last 3 days
+    python scripts/fetch_calls.py                    # Fetch today + yesterday (default)
+    python scripts/fetch_calls.py --date 2026-03-01  # Fetch specific date only
+    python scripts/fetch_calls.py --days 3           # Fetch today + last 3 days back
     python scripts/fetch_calls.py --limit 5          # Test with 5 records per account
     python scripts/fetch_calls.py --dry-run          # Preview without DB insert
 """
@@ -457,7 +460,7 @@ def process_account(account, dates, conn, max_records=None, dry_run=False):
 def main():
     parser = argparse.ArgumentParser(description="Fetch Tata Tele call records and push to Postgres")
     parser.add_argument("--date", help="Specific date to fetch (YYYY-MM-DD)")
-    parser.add_argument("--days", type=int, default=1, help="Days back to fetch (default: 1 = yesterday)")
+    parser.add_argument("--days", type=int, default=1, help="Days back to fetch (default: 1 = today + yesterday)")
     parser.add_argument("--limit", type=int, default=None, help="Max records per account per day (for testing)")
     parser.add_argument("--dry-run", action="store_true", help="Fetch but don't insert into DB")
     args = parser.parse_args()
@@ -467,13 +470,16 @@ def main():
     print(f"  Accounts: {len(TATA_TELE_ACCOUNTS)} ({', '.join(a['name'] for a in TATA_TELE_ACCOUNTS)})")
     print("=" * 60)
 
-    # Determine dates to fetch
+    # Determine dates to fetch.
+    # When no specific --date is given, always include today (offset 0) plus
+    # --days days back. This guarantees calls near midnight are never missed
+    # when running hourly: the previous day stays in scope on every run.
     if args.date:
         dates = [args.date]
     else:
+        IST = timezone(timedelta(hours=5, minutes=30))
         dates = []
-        for i in range(1, args.days + 1):
-            IST = timezone(timedelta(hours=5, minutes=30))
+        for i in range(0, args.days + 1):
             d = (datetime.now(IST) - timedelta(days=i)).strftime("%Y-%m-%d")
             dates.append(d)
 
