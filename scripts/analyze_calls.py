@@ -161,13 +161,14 @@ def get_transcripts_needing_analysis(conn, date_str=None, limit=None):
         SELECT ct.call_id, ct.transcript
         FROM {TABLE_TRANSCRIPTS} ct
         LEFT JOIN "{TABLE_ANALYSIS}" ca ON ca.activity_id = ct.call_id
+        LEFT JOIN "{TABLE_CALLS}" sd ON TRIM(BOTH '\"' FROM sd."Call ID"::text) = ct.call_id
         WHERE ca.activity_id IS NULL
           AND ct.transcript IS NOT NULL
           AND LENGTH(ct.transcript) > 20
     """
     params = []
     if date_str:
-        sql += ' AND ct.transcribed_at::date = %s'
+        sql += ' AND sd."Time"::date = %s'
         params.append(date_str)
     if limit:
         sql += ' LIMIT %s'
