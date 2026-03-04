@@ -564,19 +564,24 @@ def stage_analyze(conn, date_str=None, limit=None):
         results = download_batch_results(batch)
         print(f"    Got {len(results)} results")
 
-        for call_id, result in results.items():
-            validated = validate_analysis(result)
-            if validated:
-                save_analysis(
-                    conn, call_id,
-                    validated["issue_category"],
-                    validated["resolved"],
-                    validated["language"],
-                    validated["summary"],
-                )
-                total_success += 1
-            else:
-                total_failed += 1
+        # Use fresh connection for saves (avoids idle timeout during batch polling)
+        batch_conn = get_db_connection()
+        try:
+            for call_id, result in results.items():
+                validated = validate_analysis(result)
+                if validated:
+                    save_analysis(
+                        batch_conn, call_id,
+                        validated["issue_category"],
+                        validated["resolved"],
+                        validated["language"],
+                        validated["summary"],
+                    )
+                    total_success += 1
+                else:
+                    total_failed += 1
+        finally:
+            batch_conn.close()
 
         # Brief pause between batches to avoid rate limits
         if chunk_idx < len(chunks) - 1:
