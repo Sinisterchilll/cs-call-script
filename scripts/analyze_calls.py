@@ -40,6 +40,9 @@ TABLE_ANALYSIS = "call analysis"
 
 RATE_LIMIT_DELAY = 0.5  # Between ElevenLabs calls
 
+# OpenAI Batch API has a 90k token limit per batch. Chunk to stay under.
+BATCH_TOKEN_LIMIT = 80_000  # Leave headroom below 90k
+
 # ============================================
 # 30 SINGLE-LEVEL CATEGORIES
 # ============================================
@@ -344,14 +347,20 @@ def stage_transcribe(conn, date_str=None, limit=None):
 # STAGE 2: GPT BATCH ANALYSIS
 # ============================================
 
+def estimate_tokens(text):
+    """Rough token estimate: ~4 chars/token for English, ~3 for multilingual. Use 3 to be safe."""
+    return max(1, len(text) // 3)
+
+
 def build_batch_jsonl(transcripts):
-    """Build JSONL content for GPT Batch API."""
-    lines = []
+    """Build JSONL content for GPT Batch API. Returns list of (call_id, request_obj) for chunking."""
     categories_str = ", ".join(CATEGORIES)
+    items = []
 
     for call_id, transcript in transcripts:
+        transcript_truncated = transcript[:8000]  # Truncate very long transcripts
         user_prompt = GPT_USER_PROMPT_TEMPLATE.format(
-            transcript=transcript[:8000],  # Truncate very long transcripts
+            transcript=transcript_truncated,
             categories=categories_str,
             category_descriptions=CATEGORY_DESCRIPTIONS,
         )
@@ -370,9 +379,29 @@ def build_batch_jsonl(transcripts):
                 ],
             },
         }
-        lines.append(json.dumps(request_obj, ensure_ascii=False))
+        tokens = estimate_tokens(GPT_SYSTEM_PROMPT) + estimate_tokens(user_prompt)
+        items.append((call_id, request_obj, tokens))
 
-    return "\n".join(lines)
+    return items
+
+
+def chunk_by_token_limit(items, token_limit=BATCH_TOKEN_LIMIT):
+    """Split items into chunks that each stay under token_limit."""
+    chunks = []
+    current_chunk = []
+    current_tokens = 0
+
+    for call_id, request_obj, tokens in items:
+        if current_tokens + tokens > token_limit and current_chunk:
+            chunks.append(current_chunk)
+            current_chunk = []
+            current_tokens = 0
+        current_chunk.append((call_id, request_obj))
+        current_tokens += tokens
+
+    if current_chunk:
+        chunks.append(current_chunk)
+    return chunks
 
 
 def upload_batch_file(jsonl_content):
@@ -496,7 +525,7 @@ def validate_analysis(result):
 
 
 def stage_analyze(conn, date_str=None, limit=None):
-    """Stage 2: Batch analyze transcripts with GPT-4o."""
+    """Stage 2: Batch analyze transcripts with GPT-4o. Chunks batches to stay under 90k token limit."""
     print(f"\n{'='*60}")
     print(f"  STAGE 2: GPT-4o BATCH ANALYSIS")
     print(f"{'='*60}")
@@ -508,48 +537,52 @@ def stage_analyze(conn, date_str=None, limit=None):
         print(f"  Nothing to analyze.")
         return
 
-    # Build JSONL
-    print(f"  Building batch request ({len(transcripts)} calls)...")
-    jsonl = build_batch_jsonl(transcripts)
+    # Build request items and chunk by token limit (90k per batch)
+    items = build_batch_jsonl(transcripts)
+    chunks = chunk_by_token_limit(items)
+    print(f"  Split into {len(chunks)} batch(es) to stay under {BATCH_TOKEN_LIMIT:,} tokens each")
 
-    # Upload
-    print(f"  Uploading to OpenAI...")
-    file_id = upload_batch_file(jsonl)
-    print(f"    File ID: {file_id}")
+    total_success = 0
+    total_failed = 0
 
-    # Create batch and wait
-    print(f"  Submitting batch...")
-    batch = create_and_wait_for_batch(file_id)
-    if not batch:
-        return
+    for chunk_idx, chunk in enumerate(chunks):
+        print(f"\n  --- Batch {chunk_idx + 1}/{len(chunks)} ({len(chunk)} calls) ---")
 
-    # Download results
-    print(f"  Downloading results...")
-    results = download_batch_results(batch)
-    print(f"    Got {len(results)} results")
+        jsonl = "\n".join(json.dumps(req, ensure_ascii=False) for _, req in chunk)
 
-    # Insert into DB
-    success = 0
-    failed = 0
-    for call_id, result in results.items():
-        validated = validate_analysis(result)
-        if validated:
-            save_analysis(
-                conn, call_id,
-                validated["issue_category"],
-                validated["resolved"],
-                validated["language"],
-                validated["summary"],
-            )
-            success += 1
-        else:
-            failed += 1
+        print(f"  Uploading to OpenAI...")
+        file_id = upload_batch_file(jsonl)
+        print(f"    File ID: {file_id}")
 
-    print(f"  ✅ Analyzed: {success}, Failed: {failed}")
-    completed = batch.request_counts.completed if batch.request_counts else 0
-    total_tokens = getattr(batch, 'usage', None)
-    if total_tokens:
-        print(f"  Tokens used: {total_tokens}")
+        print(f"  Submitting batch...")
+        batch = create_and_wait_for_batch(file_id)
+        if not batch:
+            total_failed += len(chunk)
+            continue
+
+        print(f"  Downloading results...")
+        results = download_batch_results(batch)
+        print(f"    Got {len(results)} results")
+
+        for call_id, result in results.items():
+            validated = validate_analysis(result)
+            if validated:
+                save_analysis(
+                    conn, call_id,
+                    validated["issue_category"],
+                    validated["resolved"],
+                    validated["language"],
+                    validated["summary"],
+                )
+                total_success += 1
+            else:
+                total_failed += 1
+
+        # Brief pause between batches to avoid rate limits
+        if chunk_idx < len(chunks) - 1:
+            time.sleep(5)
+
+    print(f"\n  ✅ Total analyzed: {total_success}, Failed: {total_failed}")
 
 
 # ============================================
