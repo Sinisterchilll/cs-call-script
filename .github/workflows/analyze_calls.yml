@@ -2,8 +2,8 @@ name: Analyze Calls
 
 on:
   schedule:
-    # 3:00 AM IST = 9:30 PM UTC (previous day)
-    - cron: "30 21 * * *"
+    # Every 3 hours at :00 UTC
+    - cron: "0 */3 * * *"
   workflow_dispatch:
     inputs:
       date:
