@@ -1,5 +1,5 @@
 """
-Analyze call recordings: Transcribe with ElevenLabs → Analyze with GPT-4o Batch API.
+Analyze call recordings: Transcribe with ElevenLabs → Analyze with GPT-4o mini Batch API.
 Transcripts cached in DB to avoid re-transcription on failures.
 
 Usage:
@@ -370,7 +370,7 @@ def build_batch_jsonl(transcripts):
             "method": "POST",
             "url": "/v1/chat/completions",
             "body": {
-                "model": "gpt-4o",
+                "model": "gpt-4o-mini",
                 "temperature": 0.2,
                 "response_format": {"type": "json_object"},
                 "messages": [
@@ -525,9 +525,9 @@ def validate_analysis(result):
 
 
 def stage_analyze(conn, date_str=None, limit=None):
-    """Stage 2: Batch analyze transcripts with GPT-4o. Chunks batches to stay under 90k token limit."""
+    """Stage 2: Batch analyze transcripts with GPT-4o mini. Chunks batches to stay under 90k token limit."""
     print(f"\n{'='*60}")
-    print(f"  STAGE 2: GPT-4o BATCH ANALYSIS")
+    print(f"  STAGE 2: GPT-4o mini BATCH ANALYSIS")
     print(f"{'='*60}")
 
     transcripts = get_transcripts_needing_analysis(conn, date_str=date_str, limit=limit)
@@ -604,7 +604,7 @@ def main():
 
     print("=" * 60)
     print("  CALL ANALYSIS PIPELINE")
-    print("  ElevenLabs Scribe v2 + GPT-4o Batch API")
+    print("  ElevenLabs Scribe v2 + GPT-4o mini Batch API")
     print("=" * 60)
 
     conn = get_db_connection()
