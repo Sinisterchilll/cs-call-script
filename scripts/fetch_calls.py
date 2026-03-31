@@ -28,34 +28,30 @@ import time
 # CONFIGURATION (from env vars or defaults)
 # ============================================
 
-# Two Tata Tele accounts: inbound + outbound
+# Two Tata Tele accounts: inbound + outbound (keys from env only; no defaults in repo)
 TATA_TELE_ACCOUNTS = [
     {
         "name": "Inbound",
-        "api_key": os.environ.get(
-            "TATA_TELE_API_KEY_INBOUND",
-            "eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIzNDY3MzkiLCJjciI6dHJ1ZSwiaXNzIjoiaHR0cHM6Ly9jbG91ZHBob25lLnRhdGF0ZWxlc2VydmljZXMuY29tL3Rva2VuL2dlbmVyYXRlIiwiaWF0IjoxNzcxMzEwNTMwLCJleHAiOjIwNzEzMTA1MzAsIm5iZiI6MTc3MTMxMDUzMCwianRpIjoiTUU4UlEwS0RGSHp2b1NpRCJ9.dhmdj-3KwliH5e7_gGIcy-BMwR7m4zNm2Mx_RzzGlr8"
-        ),
+        "api_key": (os.environ.get("TATA_TELE_API_KEY_INBOUND") or "").strip(),
     },
     {
         "name": "Outbound",
-        "api_key": os.environ.get(
-            "TATA_TELE_API_KEY_OUTBOUND",
-            "eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJzdWIiOiI2MDEwNzMiLCJjciI6ZmFsc2UsImlzcyI6Imh0dHBzOi8vY2xvdWRwaG9uZS50YXRhdGVsZXNlcnZpY2VzLmNvbS90b2tlbi9nZW5lcmF0ZSIsImlhdCI6MTc3MjQ4MTcxNywiZXhwIjoyMDcyNDgxNzE3LCJuYmYiOjE3NzI0ODE3MTcsImp0aSI6IloxYmRBVU83eFdPYWo0b3EifQ.TXahtN_dvNdVBKkoEQpQcrPqt4njkrK9WTtx5fEHvFA"
-        ),
+        "api_key": (os.environ.get("TATA_TELE_API_KEY_OUTBOUND") or "").strip(),
     },
 ]
 
-DATABASE_URL = os.environ.get(
-    "DATABASE_URL",
-    "postgresql://postgres.lrnxhtplcuogmbtbzfmx:RaSIDQjfdzBzSiYJ@aws-1-ap-south-1.pooler.supabase.com:6543/postgres"
-)
+DATABASE_URL = (os.environ.get("DATABASE_URL") or "").strip()
 
 API_BASE = "https://api-smartflo.tatateleservices.com"
 API_PAGE_SIZE = 100      # Records per API page
 RATE_LIMIT_DELAY = 0.5   # Seconds between API requests (avoid rate limits)
 
 TABLE_NAME = "smartflo data"
+
+# Stored in column "CDR Source" (see scripts/migrations/001_add_cdr_source.sql)
+CDR_SOURCE_COLUMN = "CDR Source"
+CDR_SOURCE_TATA = "tata"
+CDR_SOURCE_OZONETEL = "ozonetel"
 
 
 # ============================================
@@ -327,6 +323,7 @@ def map_api_to_db(record):
         "Skill Name": record.get("sname") or "N/A",
         "DTMF": ivr_dtmf or "N/A",
         "Dial Assist Score (%)": "N/A",
+        CDR_SOURCE_COLUMN: CDR_SOURCE_TATA,
     }
 
 
@@ -357,8 +354,29 @@ def get_existing_call_ids(conn, date_str):
         return set()
 
 
-def insert_call_records(conn, records):
-    """Insert call records into the DB. Returns count of inserted."""
+def get_max_ozonetel_time_in_window(conn, from_dt_str: str, to_dt_str: str):
+    """Latest \"Time\" for Ozonetel rows in [from_dt_str, to_dt_str] (inclusive).
+    Used to shrink the next CDR API window so hourly jobs do not re-paginate the full range."""
+    cur = conn.cursor()
+    try:
+        cur.execute(
+            f'SELECT MAX("Time") FROM "{TABLE_NAME}" '
+            f'WHERE "{CDR_SOURCE_COLUMN}" = %s '
+            f'AND "Time" >= %s AND "Time" <= %s',
+            (CDR_SOURCE_OZONETEL, from_dt_str, to_dt_str),
+        )
+        row = cur.fetchone()
+        return row[0] if row else None
+    except Exception as e:
+        print(f"    Warning: could not read Ozonetel max time: {e}")
+        conn.rollback()
+        return None
+
+
+def insert_call_records(conn, records, commit_every=100):
+    """Insert call records into the DB. Returns count of inserted.
+    Commits every commit_every rows so long runs do not hold one huge transaction
+    (helps with pooler timeouts on large batches)."""
     if not records:
         return 0
 
@@ -370,6 +388,7 @@ def insert_call_records(conn, records):
 
     cur = conn.cursor()
     inserted = 0
+    pending = 0
     for record in records:
         values = []
         for c in columns:
@@ -381,15 +400,22 @@ def insert_call_records(conn, records):
         try:
             cur.execute(insert_sql, values)
             inserted += 1
+            pending += 1
+            if commit_every and pending >= commit_every:
+                conn.commit()
+                pending = 0
         except psycopg2.IntegrityError:
             conn.rollback()
+            pending = 0
             continue
         except Exception as e:
             conn.rollback()
+            pending = 0
             print(f"    Error inserting {record.get('Call ID')}: {e}")
             continue
 
-    conn.commit()
+    if pending:
+        conn.commit()
     return inserted
 
 
@@ -464,6 +490,19 @@ def main():
     parser.add_argument("--limit", type=int, default=None, help="Max records per account per day (for testing)")
     parser.add_argument("--dry-run", action="store_true", help="Fetch but don't insert into DB")
     args = parser.parse_args()
+
+    if not args.dry_run and not DATABASE_URL:
+        print("DATABASE_URL is required (omit --dry-run to skip DB, or set DATABASE_URL).", file=sys.stderr)
+        sys.exit(1)
+    missing_keys = [
+        ("Inbound", "TATA_TELE_API_KEY_INBOUND"),
+        ("Outbound", "TATA_TELE_API_KEY_OUTBOUND"),
+    ]
+    for name, envname in missing_keys:
+        acc = next(a for a in TATA_TELE_ACCOUNTS if a["name"] == name)
+        if not acc["api_key"]:
+            print(f"{envname} is required for account {name}.", file=sys.stderr)
+            sys.exit(1)
 
     print("=" * 60)
     print("  TATA TELE → POSTGRES CALL DATA FETCHER")

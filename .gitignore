@@ -21,4 +21,5 @@ analysis/
 
 # Environment
 .env
+google-credentials.json
 *.log

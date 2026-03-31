@@ -1,0 +1,74 @@
+name: Weekly Call Evaluation
+
+on:
+  schedule:
+    # Weekly only (not part of hourly Tata/Ozonetel/analyze pipeline in other workflows).
+    # Generate: Friday 03:30 UTC ≈ 09:00 IST
+    - cron: "30 3 * * 5"
+    # Score: Friday 13:00 UTC ≈ 18:30 IST
+    - cron: "0 13 * * 5"
+  workflow_dispatch:
+    inputs:
+      action:
+        description: "Action to perform"
+        required: true
+        default: "generate"
+        type: choice
+        options:
+          - generate
+          - score
+
+jobs:
+  eval_process:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v3
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Create Google Credentials JSON
+        env:
+          GOOGLE_CREDENTIALS_JSON: ${{ secrets.GOOGLE_CREDENTIALS_JSON }}
+        run: |
+          echo "$GOOGLE_CREDENTIALS_JSON" > google-credentials.json
+          echo "Created google-credentials.json"
+
+      - name: Run Eval Generate
+        if: github.event_name == 'schedule' && github.event.schedule == '30 3 * * 5' || github.event.inputs.action == 'generate'
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
+          SLACK_CHANNEL_ID: ${{ secrets.SLACK_CHANNEL_ID }}
+          SHEET_ID_PRUDHVI: ${{ secrets.SHEET_ID_PRUDHVI }}
+          SHEET_ID_AUM: ${{ secrets.SHEET_ID_AUM }}
+          SHEET_ID_AYUSH: ${{ secrets.SHEET_ID_AYUSH }}
+          SHEET_ID_SWARNA: ${{ secrets.SHEET_ID_SWARNA }}
+          SHEET_ID_UDITI: ${{ secrets.SHEET_ID_UDITI }}
+          SHEET_ID_SCORES: ${{ secrets.SHEET_ID_SCORES }}
+        run: |
+          python scripts/eval_generate.py
+
+      - name: Run Eval Score
+        if: github.event_name == 'schedule' && github.event.schedule == '0 13 * * 5' || github.event.inputs.action == 'score'
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
+          SLACK_CHANNEL_ID: ${{ secrets.SLACK_CHANNEL_ID }}
+          SHEET_ID_PRUDHVI: ${{ secrets.SHEET_ID_PRUDHVI }}
+          SHEET_ID_AUM: ${{ secrets.SHEET_ID_AUM }}
+          SHEET_ID_AYUSH: ${{ secrets.SHEET_ID_AYUSH }}
+          SHEET_ID_SWARNA: ${{ secrets.SHEET_ID_SWARNA }}
+          SHEET_ID_UDITI: ${{ secrets.SHEET_ID_UDITI }}
+          SHEET_ID_SCORES: ${{ secrets.SHEET_ID_SCORES }}
+        run: |
+          python scripts/eval_score.py

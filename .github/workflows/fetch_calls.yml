@@ -2,8 +2,8 @@ name: Fetch Call Data
 
 on:
   schedule:
-    # Every hour at :00 UTC. The script always fetches today + yesterday (IST)
-    # so calls near midnight are never missed between runs.
+    # Pipeline ① — minute :00 every UTC hour (see fetch_ozonetel_calls.yml :08, analyze_calls.yml :25 */3).
+    # Fetches today + yesterday (IST) so midnight crossover is covered between runs.
     - cron: "0 * * * *"
   workflow_dispatch:
     inputs:

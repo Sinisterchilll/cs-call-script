@@ -1,6 +1,10 @@
 requests
+python-dotenv
 psycopg2-binary
 pandas
 openai
 elevenlabs
 tqdm
+google-auth
+google-api-python-client
+slack-sdk

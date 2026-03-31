@@ -2,8 +2,9 @@ name: Analyze Calls
 
 on:
   schedule:
-    # Every 3 hours at :00 UTC
-    - cron: "0 */3 * * *"
+    # Pipeline ③ — :25 UTC on hours 0,3,6,9,12,15,18,21 so Tata (:00) + Ozonetel (:08) on that hour finish first.
+    # (Same hours as */3; offset avoids racing the hourly fetches.)
+    - cron: "25 */3 * * *"
   workflow_dispatch:
     inputs:
       date:
