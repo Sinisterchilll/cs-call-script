@@ -7,10 +7,11 @@ ACCESS EXCLUSIVE lock. This script retries with lock_timeout on the session pool
 (port 5432), not the transaction pooler (6543).
 
 Usage:
-  export DATABASE_URL="postgresql://...@....pooler.supabase.com:5432/postgres"
+  export DATABASE_URL_MIGRATION="postgresql://...@....pooler.supabase.com:5432/postgres"
   python scripts/apply_cdr_source_migration.py
 
-If DATABASE_URL uses :6543/, this script rewrites to :5432/ for DDL (session mode).
+Uses DATABASE_URL_MIGRATION if set, else DATABASE_URL. If the URL uses :6543/, this
+script rewrites to :5432/ for DDL (session mode).
 """
 
 from __future__ import annotations
@@ -33,10 +34,13 @@ def session_mode_url(url: str) -> str:
 
 
 def main() -> None:
-    raw = (os.environ.get("DATABASE_URL") or "").strip()
+    raw = (
+        os.environ.get("DATABASE_URL_MIGRATION") or os.environ.get("DATABASE_URL") or ""
+    ).strip()
     if not raw:
         print(
-            "Set DATABASE_URL (session pooler :5432 recommended for DDL).",
+            "Set DATABASE_URL or DATABASE_URL_MIGRATION "
+            "(session pooler :5432 recommended for DDL).",
             file=sys.stderr,
         )
         sys.exit(1)
