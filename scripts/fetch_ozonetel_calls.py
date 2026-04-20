@@ -200,23 +200,25 @@ def _combine_datetime(call_date: str | None, hhmmss: str | None) -> datetime | N
 
 def infer_ozonetel_direction(detail: dict) -> str:
     """
-    Ozonetel does not always send a literal \"direction\" field. Heuristics:
+    Ozonetel direction heuristics:
 
-    - **Outbound (dialer / agent leg):** `Event` is `AgentDial` and/or `CallFlow` contains
-      `AgentDial`, and `Type` is typically `Progressive`, `Predictive`, `Preview`, `Manual`, etc.
-      Your live outbound rows match this pattern.
+    - **Inbound:** Type=InBound AND CampaignName=Customer_support.
+      We require the campaign name check because other queues (Testride, DID-named)
+      are not true inbound CS calls and should stay Outbound.
 
-    - **Inbound (customer to DID):** look for `inbound` / `incoming` in `Event` or `CallFlow`
-      (exact strings vary by deployment). When you ingest inbound on Ozonetel, inspect a few
-      raw rows and extend this function if needed.
+    - **Outbound:** Event=AgentDial, or Type is a dialer mode
+      (Progressive, Predictive, Preview, Manual, etc.).
 
     Returns: \"Inbound\", \"Outbound\", or \"Unknown\".
     """
     ev = (detail.get("Event") or "").strip().lower()
     cf = (detail.get("CallFlow") or "").strip().lower()
     typ = (detail.get("Type") or "").strip().lower()
+    campaign = (detail.get("CampaignName") or "").strip().lower()
 
-    if "inbound" in ev or "inbound" in cf or "incoming" in ev or "incoming" in cf or "inbound" in typ:
+    # Inbound only if Type signals inbound AND campaign is Customer_support
+    if ("inbound" in typ or "inbound" in ev or "inbound" in cf or "incoming" in ev or "incoming" in cf) \
+            and campaign == "customer_support":
         return "Inbound"
 
     outbound_types = ("progressive", "predictive", "preview", "manual", "power", "autodial")
