@@ -28,6 +28,13 @@ full hour. Use `--no-incremental` for a full backfill. Overlap minutes: env
 
 Inbound vs outbound: see `infer_ozonetel_direction()` — uses Event, CallFlow, Type.
 
+Rapid-retry dedup (on by default): Ozonetel logs one CDR per redial even when a
+caller repeatedly hangs up inside the IVR. If the same customer number has
+``>= OZONETEL_DEDUP_THRESHOLD`` (default 5) CDRs inside a single fetch window,
+we keep only the earliest Answered + earliest Missed row and drop the rest
+before insert. Turn off with ``--no-dedup`` or tune with ``--dedup-threshold N``
+(env ``OZONETEL_DEDUP_THRESHOLD``). See ``dedup_rapid_retries()``.
+
 Usage:
   python scripts/fetch_ozonetel_calls.py --date 2026-03-29
   python scripts/fetch_ozonetel_calls.py --days 1 --dry-run
@@ -537,6 +544,90 @@ def fetch_cdr_page(
     return _parse(r)
 
 
+# Rapid-retry dedup: if the same customer number appears many times in one fetch
+# window, it's almost always the IVR-drop redial pattern Ozonetel doesn't dedup
+# on their side. We keep the earliest Answered + earliest Missed and drop the rest.
+OZONETEL_DEDUP_THRESHOLD = int(os.environ.get("OZONETEL_DEDUP_THRESHOLD", "5"))
+
+
+def _detail_sort_key(detail: dict) -> datetime:
+    ts = _combine_datetime(detail.get("CallDate") or "", detail.get("StartTime") or "00:00:00")
+    return ts or datetime.max
+
+
+def dedup_rapid_retries(
+    details: list[dict],
+    threshold: int = OZONETEL_DEDUP_THRESHOLD,
+) -> tuple[list[dict], dict[int, int]]:
+    """
+    Collapse rapid-retry CDRs inside a single fetch window.
+
+    For any customer number with ``>= threshold`` rows in ``details``, keep only:
+      - the earliest ``Answered`` row (if any), and
+      - the earliest non-answered row (Unanswered/Missed/Busy/…).
+    All other rows for that customer are dropped from the list before insert.
+
+    Returns ``(filtered_details, dropped_counts_by_number)``.
+    """
+    from collections import defaultdict
+
+    groups: dict[int, list[dict]] = defaultdict(list)
+    for d in details:
+        num = _parse_customer_number(d.get("CallerID"), d.get("E164"))
+        if num is None:
+            continue
+        groups[num].append(d)
+
+    drop_ucids: set[str] = set()
+    dropped_by_customer: dict[int, int] = {}
+
+    for num, rows in groups.items():
+        if len(rows) < threshold:
+            continue
+
+        rows_sorted = sorted(rows, key=_detail_sort_key)
+        earliest_answered: dict | None = None
+        earliest_missed: dict | None = None
+        for r in rows_sorted:
+            raw_status = (r.get("Status") or "").strip().lower()
+            if raw_status == "answered":
+                if earliest_answered is None:
+                    earliest_answered = r
+            else:
+                if earliest_missed is None:
+                    earliest_missed = r
+            if earliest_answered is not None and earliest_missed is not None:
+                break
+
+        keep_ucids: set[str] = set()
+        for keeper in (earliest_answered, earliest_missed):
+            if keeper is None:
+                continue
+            ucid = str(keeper.get("UCID") or keeper.get("CallID") or "").strip()
+            if ucid:
+                keep_ucids.add(ucid)
+
+        drops_for_num = 0
+        for r in rows:
+            ucid = str(r.get("UCID") or r.get("CallID") or "").strip()
+            if not ucid or ucid in keep_ucids:
+                continue
+            drop_ucids.add(ucid)
+            drops_for_num += 1
+        if drops_for_num:
+            dropped_by_customer[num] = drops_for_num
+
+    if not drop_ucids:
+        return details, {}
+
+    filtered = [
+        d
+        for d in details
+        if str(d.get("UCID") or d.get("CallID") or "").strip() not in drop_ucids
+    ]
+    return filtered, dropped_by_customer
+
+
 def fetch_all_for_window(
     domain: str,
     token: str,
@@ -621,6 +712,17 @@ def main() -> None:
         "--no-incremental",
         action="store_true",
         help="Always request the full from/to window (no tail slice from MAX(Time)); use for backfill/repair",
+    )
+    parser.add_argument(
+        "--no-dedup",
+        action="store_true",
+        help="Disable rapid-retry dedup (keep every CDR Ozonetel returns).",
+    )
+    parser.add_argument(
+        "--dedup-threshold",
+        type=int,
+        default=OZONETEL_DEDUP_THRESHOLD,
+        help=f"Dedup a customer's calls in a window when count >= this (default {OZONETEL_DEDUP_THRESHOLD}).",
     )
     args = parser.parse_args()
 
@@ -767,6 +869,20 @@ def main() -> None:
 
         grand_details += len(details)
         print(f"    Fetched CDR rows: {len(details)}")
+
+        if not args.no_dedup and details:
+            before = len(details)
+            details, dropped = dedup_rapid_retries(details, threshold=args.dedup_threshold)
+            if dropped:
+                total_dropped = sum(dropped.values())
+                print(
+                    f"    Rapid-retry dedup: dropped {total_dropped} row(s) "
+                    f"across {len(dropped)} customer(s) "
+                    f"(threshold >= {args.dedup_threshold}); kept {len(details)}/{before}"
+                )
+                sample = sorted(dropped.items(), key=lambda kv: -kv[1])[:5]
+                for num, n in sample:
+                    print(f"      {num}: -{n}")
 
         db_rows = []
         skipped_ob = 0
