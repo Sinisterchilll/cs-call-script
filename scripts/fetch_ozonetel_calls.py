@@ -216,7 +216,7 @@ def infer_ozonetel_direction(detail: dict) -> str:
     cf = (detail.get("CallFlow") or "").strip().lower()
     typ = (detail.get("Type") or "").strip().lower()
 
-    if "inbound" in ev or "inbound" in cf or "incoming" in ev or "incoming" in cf:
+    if "inbound" in ev or "inbound" in cf or "incoming" in ev or "incoming" in cf or "inbound" in typ:
         return "Inbound"
 
     outbound_types = ("progressive", "predictive", "preview", "manual", "power", "autodial")
