@@ -332,7 +332,13 @@ def map_api_to_db(record):
 # ============================================
 
 def get_db_connection():
-    return psycopg2.connect(DATABASE_URL)
+    return psycopg2.connect(
+        DATABASE_URL,
+        keepalives=1,
+        keepalives_idle=30,
+        keepalives_interval=10,
+        keepalives_count=5,
+    )
 
 
 def get_existing_call_ids(conn, date_str):

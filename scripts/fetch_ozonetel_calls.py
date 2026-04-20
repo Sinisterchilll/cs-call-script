@@ -794,13 +794,30 @@ def main() -> None:
             ):
                 print(f"      {k}: {sample.get(k)}")
         elif not args.dry_run and db_rows:
-            ins_conn = get_db_connection()
-            try:
-                n = insert_call_records(ins_conn, db_rows)
-            finally:
-                ins_conn.close()
-            grand_inserted += n
-            print(f"    Inserted: {n} (attempted {len(db_rows)})")
+            # Retry up to 3 times on SSL/connection drops (Supabase pooler can close
+            # idle connections during the CDR fetch window).
+            for attempt in range(3):
+                ins_conn = get_db_connection()
+                try:
+                    n = insert_call_records(ins_conn, db_rows)
+                    grand_inserted += n
+                    print(f"    Inserted: {n} (attempted {len(db_rows)})")
+                    break
+                except (psycopg2.OperationalError, psycopg2.InterfaceError) as e:
+                    print(f"    ⚠️  DB connection error (attempt {attempt + 1}/3): {e}")
+                    try:
+                        ins_conn.close()
+                    except Exception:
+                        pass
+                    if attempt < 2:
+                        time.sleep(5)
+                    else:
+                        print(f"    ❌ Insert failed after 3 attempts, skipping batch.")
+                else:
+                    try:
+                        ins_conn.close()
+                    except Exception:
+                        pass
 
         time.sleep(CDR_REQUEST_INTERVAL_SEC)
 
