@@ -80,8 +80,9 @@ OZONETEL_DOMAIN = (
 OZONETEL_API_KEY = os.environ.get("OZONETEL_API_KEY", "").strip()
 OZONETEL_USERNAME = os.environ.get("OZONETEL_USERNAME", "").strip()
 
-# CDR API is capped at ~2 req/min per Ozonetel docs
-CDR_REQUEST_INTERVAL_SEC = 31
+# CDR API is capped at ~2 req/min per Ozonetel docs; use 35s to leave headroom
+# for concurrent GH Actions runs sharing the same API key
+CDR_REQUEST_INTERVAL_SEC = 35
 
 # Re-fetch this much before MAX(Time) so late-arriving CDR / clock skew still land in the slice
 _DEFAULT_OVERLAP_MIN = 3
@@ -533,15 +534,23 @@ def fetch_cdr_page(
             details = []
         return details, total
 
-    r = requests.request(
-        "GET",
-        url,
-        params=params,
-        headers=headers,
-        data=json.dumps(body),
-        timeout=120,
-    )
-    return _parse(r)
+    # Ozonetel enforces ~2 req/min; retry on 429 with exponential backoff
+    for attempt in range(4):
+        r = requests.request(
+            "GET",
+            url,
+            params=params,
+            headers=headers,
+            data=json.dumps(body),
+            timeout=120,
+        )
+        if r.status_code == 429:
+            wait = 65 * (attempt + 1)
+            print(f"    ⚠️  429 rate limit on page {page_no} (attempt {attempt+1}/4) — waiting {wait}s...", flush=True)
+            time.sleep(wait)
+            continue
+        return _parse(r)
+    raise RuntimeError(f"CDR page {page_no} still rate-limited after 4 attempts")
 
 
 # Rapid-retry dedup: if the same customer number appears many times in one fetch
