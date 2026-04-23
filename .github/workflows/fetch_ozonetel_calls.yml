@@ -2,26 +2,14 @@ name: Fetch Ozonetel CDR
 
 on:
   schedule:
-    # Hourly at :08 UTC — fetches the previous full IST hour (near real-time)
+    # Hourly: full calendar day via fetchCDRDetails (Asia/Kolkata date), insert new UCIDs only
     - cron: "8 * * * *"
-    # Daily at 02:30 UTC (8:00 AM IST) — full backfill of yesterday with no incremental
-    # optimization. Catches late-arriving CDRs that the hourly jobs missed.
-    - cron: "30 2 * * *"
   workflow_dispatch:
     inputs:
-      mode:
-        description: "previous-hour (hourly default) | yesterday-full (daily backfill) | full-day (today+yesterday) | custom date"
-        required: true
-        default: "previous-hour"
-        type: choice
-        options:
-          - previous-hour
-          - yesterday-full
-          - full-day
-          - custom-date
       date:
-        description: "YYYY-MM-DD when mode is custom-date"
+        description: "YYYY-MM-DD to fetch (full day 00:00–23:59 in API body). Leave empty for today (Asia/Kolkata)."
         required: false
+        type: string
 
 jobs:
   fetch-ozonetel:
@@ -42,23 +30,13 @@ jobs:
         env:
           OZONETEL_API_KEY: ${{ secrets.OZONETEL_API_KEY }}
           OZONETEL_USERNAME: ${{ secrets.OZONETEL_USERNAME }}
-          # Optional; script defaults to in1-ccaas-api.ozonetel.com if unset/empty
           OZONETEL_DOMAIN: ${{ secrets.OZONETEL_DOMAIN }}
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
         run: |
-          MODE="${{ github.event.inputs.mode }}"
-          # Daily cron at 02:30 UTC → full backfill of yesterday (no incremental)
-          if [ -z "$MODE" ] && [ "${{ github.event.schedule }}" = "30 2 * * *" ]; then
-            MODE="yesterday-full"
+          set -euo pipefail
+          RUN_DATE="${{ github.event.inputs.date }}"
+          if [ -z "${RUN_DATE:-}" ]; then
+            RUN_DATE=$(TZ=Asia/Kolkata date +%Y-%m-%d)
           fi
-          if [ -z "$MODE" ]; then MODE="previous-hour"; fi
-
-          if [ "$MODE" = "yesterday-full" ]; then
-            python scripts/fetch_ozonetel_calls.py --yesterday --no-incremental
-          elif [ "$MODE" = "full-day" ]; then
-            python scripts/fetch_ozonetel_calls.py --days 1
-          elif [ "$MODE" = "custom-date" ] && [ -n "${{ github.event.inputs.date }}" ]; then
-            python scripts/fetch_ozonetel_calls.py --date "${{ github.event.inputs.date }}" --no-incremental
-          else
-            python scripts/fetch_ozonetel_calls.py --ist-previous-hour
-          fi
+          echo "Ozonetel: full day $RUN_DATE — fetchCDRDetails + insert missing UCIDs"
+          python scripts/fetch_ozonetel_calls.py --date "$RUN_DATE" --no-incremental --via-details
