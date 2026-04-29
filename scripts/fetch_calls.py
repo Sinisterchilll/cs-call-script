@@ -53,6 +53,9 @@ CDR_SOURCE_COLUMN = "CDR Source"
 CDR_SOURCE_TATA = "tata"
 CDR_SOURCE_OZONETEL = "ozonetel"
 
+# Ozonetel: one row per API detail leg; dedupe on this column (not on parent Call ID).
+OZONETEL_UCID_COLUMN = "Ozonetel UCID"
+
 
 # ============================================
 # TATA TELE API
@@ -360,6 +363,26 @@ def get_existing_call_ids(conn, date_str):
         return set()
 
 
+def get_existing_ozonetel_ucids(conn, date_str):
+    """Distinct Ozonetel UCIDs already stored for IST calendar date_str and next IST day (crossover)."""
+    cur = conn.cursor()
+    try:
+        cur.execute(
+            f'SELECT DISTINCT "{OZONETEL_UCID_COLUMN}" FROM "{TABLE_NAME}" '
+            f'WHERE "{CDR_SOURCE_COLUMN}" = %s '
+            f'AND "{OZONETEL_UCID_COLUMN}" IS NOT NULL '
+            f"AND TRIM(\"{OZONETEL_UCID_COLUMN}\") != '' "
+            f"AND (\"Time\" AT TIME ZONE 'Asia/Kolkata')::date >= %s::date "
+            f"AND (\"Time\" AT TIME ZONE 'Asia/Kolkata')::date <= (%s::date + interval '1 day')",
+            (CDR_SOURCE_OZONETEL, date_str, date_str),
+        )
+        return {row[0].strip() for row in cur.fetchall() if row[0]}
+    except Exception as e:
+        print(f"    Warning: could not check existing Ozonetel UCIDs: {e}")
+        conn.rollback()
+        return set()
+
+
 def get_max_ozonetel_time_in_window(conn, from_dt_str: str, to_dt_str: str):
     """Latest \"Time\" for Ozonetel rows in [from_dt_str, to_dt_str] (inclusive).
     Used to shrink the next CDR API window so hourly jobs do not re-paginate the full range."""
@@ -423,6 +446,77 @@ def insert_call_records(conn, records, commit_every=100):
     if pending:
         conn.commit()
     return inserted
+
+
+def upsert_ozonetel_call_records(conn, records, commit_every=50):
+    """
+    Insert or full-row UPDATE by (CDR Source = ozonetel, Ozonetel UCID).
+    Keeps \"Call ID\" = parent CallID and \"Time\" from map in sync with the API.
+    Returns (inserted_count, updated_count).
+    """
+    if not records:
+        return 0, 0
+
+    columns = list(records[0].keys())
+    col_assign = ", ".join(
+        [f'"{c.replace("%", "%%")}" = %s' for c in columns]
+    )
+    insert_sql = (
+        f'INSERT INTO "{TABLE_NAME}" ('
+        + ", ".join([f'"{c.replace("%", "%%")}"' for c in columns])
+        + ") VALUES ("
+        + ", ".join(["%s"] * len(columns))
+        + ")"
+    )
+    update_sql = (
+        f'UPDATE "{TABLE_NAME}" SET {col_assign} '
+        f'WHERE "{CDR_SOURCE_COLUMN}" = %s AND "{OZONETEL_UCID_COLUMN}" = %s'
+    )
+
+    def _vals(rec):
+        out = []
+        for c in columns:
+            v = rec[c]
+            if isinstance(v, (dict, list)):
+                v = json.dumps(v, ensure_ascii=False)
+            out.append(v)
+        return out
+
+    cur = conn.cursor()
+    ins, upd = 0, 0
+    pending = 0
+    sp_i = 0
+    for rec in records:
+        ucid = rec.get(OZONETEL_UCID_COLUMN)
+        if not ucid:
+            continue
+        vals = _vals(rec)
+        cur.execute(
+            f'SELECT 1 FROM "{TABLE_NAME}" '
+            f'WHERE "{CDR_SOURCE_COLUMN}" = %s AND "{OZONETEL_UCID_COLUMN}" = %s '
+            f"LIMIT 1",
+            (CDR_SOURCE_OZONETEL, ucid),
+        )
+        if cur.fetchone():
+            cur.execute(update_sql, vals + [CDR_SOURCE_OZONETEL, ucid])
+            upd += 1
+        else:
+            sp_i += 1
+            cur.execute(f"SAVEPOINT oz_up_{sp_i}")
+            try:
+                cur.execute(insert_sql, vals)
+                ins += 1
+                cur.execute(f"RELEASE SAVEPOINT oz_up_{sp_i}")
+            except psycopg2.IntegrityError:
+                cur.execute(f"ROLLBACK TO SAVEPOINT oz_up_{sp_i}")
+        pending += 1
+        if commit_every and pending >= commit_every:
+            conn.commit()
+            pending = 0
+            cur = conn.cursor()
+    if pending:
+        conn.commit()
+    return ins, upd
 
 
 # ============================================

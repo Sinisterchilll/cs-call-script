@@ -66,9 +66,10 @@ from fetch_calls import (
     DATABASE_URL,
     format_duration,
     get_db_connection,
-    get_existing_call_ids,
+    get_existing_ozonetel_ucids,
     get_max_ozonetel_time_in_window,
-    insert_call_records,
+    OZONETEL_UCID_COLUMN,
+    upsert_ozonetel_call_records,
 )
 
 IST = timezone(timedelta(hours=5, minutes=30))
@@ -197,10 +198,16 @@ def _parse_did(did: str | None) -> int | None:
 
 
 def _combine_datetime(call_date: str | None, hhmmss: str | None) -> datetime | None:
+    """
+    Ozonetel CallDate + StartTime are India wall clock (IST). Attach IST so timestamptz
+    stores the correct instant; then (Time AT TIME ZONE 'Asia/Kolkata')::time matches
+    the API for working-hours / inside-outside splits. Same numeric clock as the API.
+    """
     if not call_date or not hhmmss:
         return None
     try:
-        return datetime.strptime(f"{call_date.strip()} {hhmmss.strip()}", "%Y-%m-%d %H:%M:%S")
+        naive = datetime.strptime(f"{call_date.strip()} {hhmmss.strip()}", "%Y-%m-%d %H:%M:%S")
+        return naive.replace(tzinfo=IST)
     except ValueError:
         return None
 
@@ -380,14 +387,27 @@ def _agent_hangup_like_tata(detail: dict) -> str:
     return "N/A"
 
 
+def ozonetel_leg_key(detail: dict) -> str:
+    """Stable per-leg id for dedup: UCID when present, else CallID (single-leg edge case)."""
+    u = str(detail.get("UCID") or detail.get("ucid") or "").strip()
+    if u:
+        return u
+    return str(detail.get("CallID") or detail.get("callId") or "").strip()
+
+
 def map_ozonetel_detail_to_db(detail: dict) -> dict:
     """
     Map one Ozonetel CDR `details[]` object to the same columns and *conventions* as
     scripts/fetch_calls.map_api_to_db (Tata Tele): same \"N/A\" defaults, same duration
     semantics, text Call Flow, Disposition in Disposition Names (Dialer Disposition stays
     N/A like Tata), Call Start/Answered/End Time left N/A like Tata's API mapping.
+
+    \"Call ID\" stores Ozonetel parent CallID (logical call) when available; UCID is stored
+    in \"Ozonetel UCID\" for deduplication (one DB row per API detail leg).
     """
-    ucid = str(detail.get("UCID") or detail.get("CallID") or "").strip()
+    ucid = ozonetel_leg_key(detail)
+    parent = str(detail.get("CallID") or detail.get("callId") or "").strip()
+    call_id_value = parent or ucid
     call_date = detail.get("CallDate") or ""
     start_t = detail.get("StartTime") or detail.get("PickupTime") or "00:00:00"
     timestamp = _combine_datetime(call_date, start_t)
@@ -414,7 +434,8 @@ def map_ozonetel_detail_to_db(detail: dict) -> dict:
     return {
         "Direction": direction,
         "Call Status": call_status,
-        "Call ID": Json(ucid),
+        "Call ID": Json(call_id_value),
+        OZONETEL_UCID_COLUMN: ucid,
         "Time": timestamp,
         "Customer Number": _parse_customer_number(detail.get("CallerID"), detail.get("E164")),
         "Customer Name": cust_name,
@@ -763,6 +784,7 @@ def main() -> None:
     print("  Token OK (valid ~60m per Ozonetel docs)")
 
     grand_inserted = 0
+    grand_updated = 0
     grand_details = 0
 
     for label, from_dt, to_dt in windows:
@@ -773,7 +795,7 @@ def main() -> None:
         if not args.dry_run:
             id_conn = get_db_connection()
             try:
-                existing = get_existing_call_ids(id_conn, day_str)
+                existing = get_existing_ozonetel_ucids(id_conn, day_str)
                 if not args.no_incremental:
                     db_max = get_max_ozonetel_time_in_window(id_conn, from_dt, to_dt)
                     narrowed = narrow_fetch_window_for_incremental(
@@ -796,7 +818,7 @@ def main() -> None:
                         )
             finally:
                 id_conn.close()
-            print(f"    Existing Call IDs (around {day_str}): {len(existing)}")
+            print(f"    Existing Ozonetel UCIDs (around {day_str}): {len(existing)}")
 
         time.sleep(CDR_REQUEST_INTERVAL_SEC)
         try:
@@ -835,19 +857,18 @@ def main() -> None:
         db_rows = []
         skipped_ob = 0
         for d in details:
-            cid = str(d.get("UCID") or d.get("CallID") or "").strip()
-            if not cid or cid in existing:
+            cid = ozonetel_leg_key(d)
+            if not cid:
                 continue
             row = map_ozonetel_detail_to_db(d)
             if args.outbound_only and row.get("Direction") != "Outbound":
                 skipped_ob += 1
                 continue
             db_rows.append(row)
-            existing.add(cid)
 
         if args.outbound_only and skipped_ob:
             print(f"    Skipped (not Outbound): {skipped_ob}")
-        print(f"    New rows to insert: {len(db_rows)}")
+        print(f"    Rows to upsert (insert or update by Ozonetel UCID): {len(db_rows)}")
         if args.dry_run and db_rows:
             sample = db_rows[0]
             for k in (
@@ -865,9 +886,10 @@ def main() -> None:
             for attempt in range(3):
                 ins_conn = get_db_connection()
                 try:
-                    n = insert_call_records(ins_conn, db_rows)
-                    grand_inserted += n
-                    print(f"    Inserted: {n} (attempted {len(db_rows)})")
+                    ins, upd = upsert_ozonetel_call_records(ins_conn, db_rows)
+                    grand_inserted += ins
+                    grand_updated += upd
+                    print(f"    Upserted: inserted {ins} | updated {upd} (attempted {len(db_rows)})")
                     break
                 except (psycopg2.OperationalError, psycopg2.InterfaceError) as e:
                     print(f"    ⚠️  DB connection error (attempt {attempt + 1}/3): {e}")
@@ -878,7 +900,7 @@ def main() -> None:
                     if attempt < 2:
                         time.sleep(5)
                     else:
-                        print(f"    ❌ Insert failed after 3 attempts, skipping batch.")
+                        print(f"    ❌ Upsert failed after 3 attempts, skipping batch.")
                 else:
                     try:
                         ins_conn.close()
@@ -888,7 +910,10 @@ def main() -> None:
         time.sleep(CDR_REQUEST_INTERVAL_SEC)
 
     print(f"\n{'='*60}")
-    print(f"  Done. CDR rows fetched: {grand_details}  |  Inserted this run: {grand_inserted}")
+    print(
+        f"  Done. CDR rows fetched: {grand_details}  |  "
+        f"Inserted: {grand_inserted}  |  Updated: {grand_updated}"
+    )
     print(f"{'='*60}")
 
 
