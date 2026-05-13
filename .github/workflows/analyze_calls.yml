@@ -23,6 +23,9 @@ on:
         required: false
         type: boolean
         default: false
+      from_date:
+        description: "Backfill from this date onwards (YYYY-MM-DD). Leave empty to process yesterday + today only."
+        required: false
       transcriber:
         description: "Transcriber to use"
         required: false
@@ -60,6 +63,9 @@ jobs:
           ARGS=""
           if [ -n "${{ github.event.inputs.date }}" ]; then
             ARGS="$ARGS --date ${{ github.event.inputs.date }}"
+          fi
+          if [ -n "${{ github.event.inputs.from_date }}" ]; then
+            ARGS="$ARGS --from-date ${{ github.event.inputs.from_date }}"
           fi
           if [ -n "${{ github.event.inputs.limit }}" ]; then
             ARGS="$ARGS --limit ${{ github.event.inputs.limit }}"

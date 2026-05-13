@@ -135,8 +135,16 @@ def get_db_connection():
     return psycopg2.connect(DATABASE_URL)
 
 
-def get_calls_needing_transcription(conn, date_str=None, limit=None):
-    """Get answered calls with recordings that haven't been transcribed yet."""
+def get_calls_needing_transcription(conn, date_str=None, from_date=None, limit=None):
+    """Get answered calls with recordings that haven't been transcribed yet.
+
+    By default only looks at yesterday + today to avoid getting stuck on backlogs.
+    Pass from_date (YYYY-MM-DD) to backfill from a specific date, or date_str for a single day.
+    """
+    # Default cutoff: yesterday (covers today + yesterday IST across UTC midnight)
+    cutoff = from_date if from_date else "CURRENT_DATE - INTERVAL '1 day'"
+    cutoff_sql = '%s' if from_date else cutoff
+
     sql = f"""
         SELECT TRIM(BOTH '"' FROM sd."Call ID"::text) as call_id, sd."Recording"
         FROM "{TABLE_CALLS}" sd
@@ -146,9 +154,9 @@ def get_calls_needing_transcription(conn, date_str=None, limit=None):
           AND sd."Call Status" = 'Answered'
           AND sd."Recording" IS NOT NULL
           AND sd."Recording" != 'N/A'
-          AND sd."Time" >= '2026-03-01'
+          AND sd."Time" >= {cutoff_sql}
     """
-    params = []
+    params = [from_date] if from_date else []
     if date_str:
         sql += ' AND sd."Time"::date = %s'
         params.append(date_str)
@@ -365,13 +373,18 @@ def transcribe_recording(audio_path):
     return transcribe_with_elevenlabs(audio_path)
 
 
-def stage_transcribe(conn, date_str=None, limit=None):
-    """Stage 1: Download recordings and transcribe with ElevenLabs."""
+def stage_transcribe(conn, date_str=None, from_date=None, limit=None):
+    """Stage 1: Download recordings and transcribe."""
     print(f"\n{'='*60}")
-    print(f"  STAGE 1: DOWNLOAD + TRANSCRIBE (ElevenLabs Scribe v2)")
+    print(f"  STAGE 1: DOWNLOAD + TRANSCRIBE ({TRANSCRIBER.upper()})")
     print(f"{'='*60}")
 
-    calls = get_calls_needing_transcription(conn, date_str=date_str, limit=limit)
+    if from_date:
+        print(f"  Backfill mode: from {from_date} onwards")
+    elif not date_str:
+        print(f"  Default mode: yesterday + today only")
+
+    calls = get_calls_needing_transcription(conn, date_str=date_str, from_date=from_date, limit=limit)
     print(f"  Calls needing transcription: {len(calls)}")
 
     if not calls:
@@ -672,6 +685,7 @@ def stage_analyze(conn, date_str=None, limit=None):
 def main():
     parser = argparse.ArgumentParser(description="Analyze call recordings")
     parser.add_argument("--date", help="Only process calls from this date (YYYY-MM-DD)")
+    parser.add_argument("--from-date", help="Backfill: process all calls from this date onwards (YYYY-MM-DD)")
     parser.add_argument("--limit", type=int, help="Max calls to process")
     parser.add_argument("--transcribe-only", action="store_true", help="Only transcribe, skip GPT")
     parser.add_argument("--analyze-only", action="store_true", help="Only GPT batch (transcripts must exist)")
@@ -698,7 +712,7 @@ def main():
             print("  ❌ ELEVENLABS_API_KEY not set!")
             sys.exit(1)
         print(f"  Transcriber: {TRANSCRIBER.upper()}")
-        stage_transcribe(conn, date_str=args.date, limit=args.limit)
+        stage_transcribe(conn, date_str=args.date, from_date=args.from_date, limit=args.limit)
 
     if not args.transcribe_only:
         if not OPENAI_API_KEY:
