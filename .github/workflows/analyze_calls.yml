@@ -23,6 +23,14 @@ on:
         required: false
         type: boolean
         default: false
+      transcriber:
+        description: "Transcriber to use"
+        required: false
+        default: "elevenlabs"
+        type: choice
+        options:
+          - elevenlabs
+          - deepgram
 
 jobs:
   analyze:
@@ -44,6 +52,8 @@ jobs:
       - name: Analyze calls
         env:
           ELEVENLABS_API_KEY: ${{ secrets.ELEVENLABS_API_KEY }}
+          DEEPGRAM_API_KEY: ${{ secrets.DEEPGRAM_API_KEY }}
+          TRANSCRIBER: ${{ github.event.inputs.transcriber || secrets.TRANSCRIBER || 'elevenlabs' }}
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
         run: |

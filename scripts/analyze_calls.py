@@ -27,7 +27,11 @@ from io import BytesIO
 # ============================================
 
 ELEVENLABS_API_KEY = os.environ.get("ELEVENLABS_API_KEY", "")
-OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY", "")
+DEEPGRAM_API_KEY   = os.environ.get("DEEPGRAM_API_KEY", "")
+OPENAI_API_KEY     = os.environ.get("OPENAI_API_KEY", "")
+
+# "elevenlabs" or "deepgram" — set via TRANSCRIBER secret/env
+TRANSCRIBER = os.environ.get("TRANSCRIBER", "elevenlabs").lower().strip()
 
 DATABASE_URL = os.environ.get(
     "DATABASE_URL",
@@ -241,8 +245,8 @@ def download_recording(recording_url):
         return None
 
 
-def transcribe_recording(audio_path):
-    """Transcribe audio with ElevenLabs Scribe v2. Returns (transcript, language) or None."""
+def transcribe_with_elevenlabs(audio_path):
+    """Transcribe audio with ElevenLabs Scribe v2. Returns (transcript, language) or (None, None)."""
     try:
         from elevenlabs import ElevenLabs
         client = ElevenLabs(api_key=ELEVENLABS_API_KEY)
@@ -286,8 +290,79 @@ def transcribe_recording(audio_path):
         err_msg = str(e)
         if 'quota_exceeded' in err_msg.lower():
             return "QUOTA_EXHAUSTED", None
-        print(f"    Transcription error: {err_msg[:100]}")
+        print(f"    ElevenLabs transcription error: {err_msg[:100]}")
         return None, None
+
+
+def transcribe_with_deepgram(audio_path):
+    """Transcribe audio with Deepgram nova-2. Returns (transcript, language) or (None, None)."""
+    try:
+        params = {
+            "model": "nova-2",
+            "diarize": "true",
+            "detect_language": "true",
+            "punctuate": "true",
+            "smart_format": "true",
+            "utterances": "true",
+        }
+        headers = {
+            "Authorization": f"Token {DEEPGRAM_API_KEY}",
+            "Content-Type": "audio/mp3",
+        }
+        with open(audio_path, 'rb') as f:
+            resp = requests.post(
+                "https://api.deepgram.com/v1/listen",
+                params=params, headers=headers, data=f, timeout=300
+            )
+
+        if resp.status_code != 200:
+            try:
+                err = resp.json().get("err_msg", resp.text)
+            except Exception:
+                err = resp.text
+            print(f"    Deepgram error {resp.status_code}: {err[:100]}")
+            return None, None
+
+        data       = resp.json()
+        channel    = data.get("results", {}).get("channels", [{}])[0]
+        alt        = channel.get("alternatives", [{}])[0]
+        raw_text   = alt.get("transcript", "").strip()
+        language   = channel.get("detected_language", "unknown")
+        utterances = data.get("results", {}).get("utterances", [])
+
+        if not raw_text:
+            return None, None
+
+        # Merge consecutive same-speaker utterances into clean dialogue blocks
+        if utterances:
+            merged = []
+            for u in utterances:
+                spk  = u.get("speaker", 0)
+                text = u.get("transcript", "").strip()
+                if not text:
+                    continue
+                if merged and merged[-1]["speaker"] == spk:
+                    merged[-1]["text"] += " " + text
+                else:
+                    merged.append({"speaker": spk, "text": text})
+            transcript = "\n".join(
+                f"Speaker {b['speaker']}: {b['text']}" for b in merged
+            )
+        else:
+            transcript = raw_text
+
+        return transcript, language
+
+    except Exception as e:
+        print(f"    Deepgram transcription error: {str(e)[:100]}")
+        return None, None
+
+
+def transcribe_recording(audio_path):
+    """Route transcription to the configured provider (TRANSCRIBER env var)."""
+    if TRANSCRIBER == "deepgram":
+        return transcribe_with_deepgram(audio_path)
+    return transcribe_with_elevenlabs(audio_path)
 
 
 def stage_transcribe(conn, date_str=None, limit=None):
@@ -325,7 +400,7 @@ def stage_transcribe(conn, date_str=None, limit=None):
             pass
 
         if transcript == "QUOTA_EXHAUSTED":
-            print("⚠️  ElevenLabs quota exhausted! Stopping.")
+            print("⚠️  ElevenLabs quota exhausted — stopping transcription for this run.")
             break
 
         if not transcript:
@@ -616,9 +691,13 @@ def main():
         print(f"  Limit: {args.limit}")
 
     if not args.analyze_only:
-        if not ELEVENLABS_API_KEY:
+        if TRANSCRIBER == "deepgram" and not DEEPGRAM_API_KEY:
+            print("  ❌ DEEPGRAM_API_KEY not set!")
+            sys.exit(1)
+        if TRANSCRIBER == "elevenlabs" and not ELEVENLABS_API_KEY:
             print("  ❌ ELEVENLABS_API_KEY not set!")
             sys.exit(1)
+        print(f"  Transcriber: {TRANSCRIBER.upper()}")
         stage_transcribe(conn, date_str=args.date, limit=args.limit)
 
     if not args.transcribe_only:
