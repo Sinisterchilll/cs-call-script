@@ -44,6 +44,11 @@ TABLE_ANALYSIS = "call analysis"
 
 RATE_LIMIT_DELAY = 0.5  # Between ElevenLabs calls
 
+ACTIVITY_ID_SQL = """COALESCE(
+    NULLIF(TRIM(sd."Ozonetel UCID"), ''),
+    TRIM(BOTH '"' FROM sd."Call ID"::text)
+)"""
+
 # OpenAI Batch API has a 90k token limit per batch. Chunk to stay under.
 BATCH_TOKEN_LIMIT = 80_000  # Leave headroom below 90k
 
@@ -146,15 +151,17 @@ def get_calls_needing_transcription(conn, date_str=None, from_date=None, limit=N
     cutoff_sql = '%s' if from_date else cutoff
 
     sql = f"""
-        SELECT TRIM(BOTH '"' FROM sd."Call ID"::text) as call_id, sd."Recording"
+        SELECT {ACTIVITY_ID_SQL} as call_id, sd."Recording"
         FROM "{TABLE_CALLS}" sd
         LEFT JOIN {TABLE_TRANSCRIPTS} ct
-            ON ct.call_id = TRIM(BOTH '"' FROM sd."Call ID"::text)
+            ON ct.call_id = {ACTIVITY_ID_SQL}
         WHERE ct.call_id IS NULL
           AND sd."Call Status" = 'Answered'
           AND sd."Recording" IS NOT NULL
           AND sd."Recording" != 'N/A'
           AND sd."Time" >= {cutoff_sql}
+          AND {ACTIVITY_ID_SQL} IS NOT NULL
+          AND {ACTIVITY_ID_SQL} != ''
     """
     params = [from_date] if from_date else []
     if date_str:
@@ -173,18 +180,39 @@ def get_calls_needing_transcription(conn, date_str=None, from_date=None, limit=N
 def get_transcripts_needing_analysis(conn, date_str=None, limit=None):
     """Get transcripts that haven't been analyzed yet."""
     sql = f"""
-        SELECT ct.call_id, ct.transcript
-        FROM {TABLE_TRANSCRIPTS} ct
-        LEFT JOIN "{TABLE_ANALYSIS}" ca ON ca.activity_id = ct.call_id
-        LEFT JOIN "{TABLE_CALLS}" sd ON TRIM(BOTH '\"' FROM sd."Call ID"::text) = ct.call_id
-        WHERE ca.activity_id IS NULL
-          AND ct.transcript IS NOT NULL
-          AND LENGTH(ct.transcript) > 20
+        WITH candidates AS (
+            SELECT DISTINCT ON (activity_id)
+                activity_id,
+                transcript,
+                call_time
+            FROM (
+                SELECT
+                    COALESCE(NULLIF(TRIM(sd."Ozonetel UCID"), ''), ct.call_id) AS activity_id,
+                    ct.transcript,
+                    sd."Time" AS call_time
+                FROM {TABLE_TRANSCRIPTS} ct
+                LEFT JOIN "{TABLE_CALLS}" sd
+                    ON {ACTIVITY_ID_SQL} = ct.call_id
+                    OR TRIM(BOTH '"' FROM sd."Call ID"::text) = ct.call_id
+                WHERE ct.transcript IS NOT NULL
+                  AND LENGTH(ct.transcript) > 20
     """
     params = []
     if date_str:
-        sql += ' AND sd."Time"::date = %s'
+        sql += '                  AND sd."Time"::date = %s'
         params.append(date_str)
+    sql += f"""
+            ) mapped
+            WHERE activity_id IS NOT NULL
+              AND TRIM(activity_id) != ''
+            ORDER BY activity_id, call_time DESC NULLS LAST
+        )
+        SELECT c.activity_id, c.transcript
+        FROM candidates c
+        LEFT JOIN "{TABLE_ANALYSIS}" ca ON ca.activity_id = c.activity_id
+        WHERE ca.activity_id IS NULL
+        ORDER BY c.call_time DESC NULLS LAST
+    """
     if limit:
         sql += ' LIMIT %s'
         params.append(limit)
