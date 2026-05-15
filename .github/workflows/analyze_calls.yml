@@ -1,9 +1,9 @@
-name: Analyze Calls
+name: Transcribe Calls
 
 on:
   schedule:
-    # Pipeline ③ — :25 UTC on hours 0,3,6,9,12,15,18,21 so Tata (:00) + Ozonetel (:08) on that hour finish first.
-    # (Same hours as */3; offset avoids racing the hourly fetches.)
+    # Pipeline ③ — transcription only. Runs after Ozonetel fetch at :08.
+    # OpenAI analysis is handled by analyze_transcripts.yml on offset hours.
     - cron: "25 */3 * * *"
   workflow_dispatch:
     inputs:
@@ -13,16 +13,6 @@ on:
       limit:
         description: "Max calls to process (for testing)"
         required: false
-      transcribe_only:
-        description: "Only transcribe, skip GPT analysis"
-        required: false
-        type: boolean
-        default: false
-      analyze_only:
-        description: "Only GPT analysis (transcripts must exist)"
-        required: false
-        type: boolean
-        default: false
       from_date:
         description: "Backfill from this date onwards (YYYY-MM-DD). Leave empty to process yesterday + today only."
         required: false
@@ -36,9 +26,12 @@ on:
           - deepgram
 
 jobs:
-  analyze:
+  transcribe:
     runs-on: ubuntu-latest
     timeout-minutes: 120
+    concurrency:
+      group: transcribe-calls
+      cancel-in-progress: false
 
     steps:
       - name: Checkout code
@@ -50,14 +43,13 @@ jobs:
           python-version: "3.12"
 
       - name: Install dependencies
-        run: pip install requests psycopg2-binary elevenlabs openai
+        run: pip install requests psycopg2-binary elevenlabs
 
-      - name: Analyze calls
+      - name: Transcribe calls
         env:
           ELEVENLABS_API_KEY: ${{ secrets.ELEVENLABS_API_KEY }}
           DEEPGRAM_API_KEY: ${{ secrets.DEEPGRAM_API_KEY }}
           TRANSCRIBER: ${{ github.event.inputs.transcriber || secrets.TRANSCRIBER || 'elevenlabs' }}
-          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
         run: |
           ARGS=""
@@ -70,10 +62,5 @@ jobs:
           if [ -n "${{ github.event.inputs.limit }}" ]; then
             ARGS="$ARGS --limit ${{ github.event.inputs.limit }}"
           fi
-          if [ "${{ github.event.inputs.transcribe_only }}" = "true" ]; then
-            ARGS="$ARGS --transcribe-only"
-          fi
-          if [ "${{ github.event.inputs.analyze_only }}" = "true" ]; then
-            ARGS="$ARGS --analyze-only"
-          fi
+          ARGS="$ARGS --transcribe-only"
           python scripts/analyze_calls.py $ARGS

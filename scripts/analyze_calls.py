@@ -179,40 +179,58 @@ def get_calls_needing_transcription(conn, date_str=None, from_date=None, limit=N
 
 def get_transcripts_needing_analysis(conn, date_str=None, limit=None):
     """Get transcripts that haven't been analyzed yet."""
-    sql = f"""
-        WITH candidates AS (
-            SELECT DISTINCT ON (activity_id)
-                activity_id,
-                transcript,
-                call_time
-            FROM (
-                SELECT
-                    COALESCE(NULLIF(TRIM(sd."Ozonetel UCID"), ''), ct.call_id) AS activity_id,
-                    ct.transcript,
-                    sd."Time" AS call_time
-                FROM {TABLE_TRANSCRIPTS} ct
-                LEFT JOIN "{TABLE_CALLS}" sd
-                    ON {ACTIVITY_ID_SQL} = ct.call_id
-                    OR TRIM(BOTH '"' FROM sd."Call ID"::text) = ct.call_id
-                WHERE ct.transcript IS NOT NULL
-                  AND LENGTH(ct.transcript) > 20
-    """
     params = []
     if date_str:
-        sql += '                  AND sd."Time"::date = %s'
-        params.append(date_str)
-    sql += f"""
-            ) mapped
-            WHERE activity_id IS NOT NULL
-              AND TRIM(activity_id) != ''
-            ORDER BY activity_id, call_time DESC NULLS LAST
-        )
-        SELECT c.activity_id, c.transcript
-        FROM candidates c
-        LEFT JOIN "{TABLE_ANALYSIS}" ca ON ca.activity_id = c.activity_id
-        WHERE ca.activity_id IS NULL
-        ORDER BY c.call_time DESC NULLS LAST
-    """
+        sql = f"""
+            WITH date_activity_ids AS (
+                SELECT
+                    NULLIF(TRIM(sd."Ozonetel UCID"), '') AS activity_id,
+                    MAX(sd."Time") AS call_time
+                FROM "{TABLE_CALLS}" sd
+                WHERE (sd."Time" AT TIME ZONE 'Asia/Kolkata')::date = %s::date
+                  AND sd."Ozonetel UCID" IS NOT NULL
+                  AND TRIM(sd."Ozonetel UCID") != ''
+                GROUP BY 1
+
+                UNION
+
+                SELECT
+                    NULLIF(TRIM(BOTH '"' FROM sd."Call ID"::text), '') AS activity_id,
+                    MAX(sd."Time") AS call_time
+                FROM "{TABLE_CALLS}" sd
+                WHERE (sd."Time" AT TIME ZONE 'Asia/Kolkata')::date = %s::date
+                GROUP BY 1
+            ),
+            candidates AS (
+                SELECT DISTINCT ON (ct.call_id)
+                    ct.call_id,
+                    ct.transcript,
+                    dai.call_time
+                FROM {TABLE_TRANSCRIPTS} ct
+                INNER JOIN date_activity_ids dai ON dai.activity_id = ct.call_id
+                LEFT JOIN "{TABLE_ANALYSIS}" ca ON ca.activity_id = ct.call_id
+                WHERE ca.activity_id IS NULL
+                  AND ct.transcript IS NOT NULL
+                  AND LENGTH(ct.transcript) > 20
+                ORDER BY ct.call_id, dai.call_time DESC NULLS LAST
+            )
+            SELECT call_id, transcript
+            FROM candidates
+            ORDER BY call_time DESC NULLS LAST
+        """
+        params.extend([date_str, date_str])
+    else:
+        sql = f"""
+            SELECT ct.call_id, ct.transcript
+            FROM {TABLE_TRANSCRIPTS} ct
+            LEFT JOIN "{TABLE_ANALYSIS}" ca ON ca.activity_id = ct.call_id
+            WHERE ca.activity_id IS NULL
+              AND ct.call_id IS NOT NULL
+              AND TRIM(ct.call_id) != ''
+              AND ct.transcript IS NOT NULL
+              AND LENGTH(ct.transcript) > 20
+            ORDER BY ct.call_id
+        """
     if limit:
         sql += ' LIMIT %s'
         params.append(limit)

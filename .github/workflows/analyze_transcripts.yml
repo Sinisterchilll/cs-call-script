@@ -1,0 +1,49 @@
+name: Analyze Transcripts
+
+on:
+  schedule:
+    # OpenAI analysis only. Offset from transcription (:25 every 3 hours)
+    # so transcription has time to finish before GPT batch work starts.
+    - cron: "55 1,4,7,10,13,16,19,22 * * *"
+  workflow_dispatch:
+    inputs:
+      date:
+        description: "Specific date (YYYY-MM-DD), leave empty for all pending"
+        required: false
+      limit:
+        description: "Max transcripts to analyze (for testing)"
+        required: false
+
+jobs:
+  analyze:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    concurrency:
+      group: analyze-transcripts
+      cancel-in-progress: false
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: pip install requests psycopg2-binary openai
+
+      - name: Analyze transcripts
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+        run: |
+          ARGS="--analyze-only"
+          if [ -n "${{ github.event.inputs.date }}" ]; then
+            ARGS="$ARGS --date ${{ github.event.inputs.date }}"
+          fi
+          if [ -n "${{ github.event.inputs.limit }}" ]; then
+            ARGS="$ARGS --limit ${{ github.event.inputs.limit }}"
+          fi
+          python scripts/analyze_calls.py $ARGS
